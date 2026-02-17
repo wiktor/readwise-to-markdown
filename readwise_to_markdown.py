@@ -3,7 +3,8 @@
 Readwise Reader → Markdown exporter.
 
 Fetches documents from Readwise Reader API and exports them
-as clean markdown files organized by reading status.
+as individual markdown files with YAML frontmatter, organized
+into folders by reading status.
 
 Usage:
     export READWISE_TOKEN="your_token_here"
@@ -85,63 +86,88 @@ def fetch_highlights(token, doc_id):
     return data.get("results", [])
 
 
-def slugify(text, max_len=60):
+def slugify(text, max_len=80):
     """Create a filesystem-safe slug from text."""
     text = text.lower().strip()
     text = re.sub(r'[^\w\s-]', '', text)
     text = re.sub(r'[\s_]+', '-', text)
     text = re.sub(r'-+', '-', text).strip('-')
-    return text[:max_len]
+    return text[:max_len] if text else "untitled"
 
 
 def format_date(date_str):
-    """Format an ISO date string to a readable format."""
+    """Format an ISO date string to YYYY-MM-DD."""
     if not date_str:
-        return "Unknown"
+        return None
     try:
         dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
         return dt.strftime("%Y-%m-%d")
     except (ValueError, AttributeError):
-        return date_str[:10] if date_str else "Unknown"
+        return date_str[:10] if date_str else None
 
 
-def progress_bar(progress):
-    """Create a simple text progress bar."""
-    if progress is None or progress == 0:
-        return "not started"
-    pct = int(progress * 100)
-    filled = int(progress * 10)
-    bar = "█" * filled + "░" * (10 - filled)
-    return f"{bar} {pct}%"
+def yaml_escape(val):
+    """Escape a string for YAML frontmatter."""
+    if val is None:
+        return '""'
+    val = str(val)
+    if any(c in val for c in ':{}[]#&*!|>\'"@`,%'):
+        return f'"{val.replace(chr(34), chr(92)+chr(34))}"'
+    return val
 
 
-def document_to_markdown(doc, include_highlights=False):
-    """Convert a single document to a markdown entry."""
-    title = doc.get("title", "Untitled")
-    author = doc.get("author", "Unknown")
-    source_url = doc.get("source_url", "")
+def document_to_file(doc):
+    """Convert a single document to a markdown string with YAML frontmatter."""
+    title = doc.get("title", "Untitled") or "Untitled"
+    author = doc.get("author") or ""
+    source_url = doc.get("source_url", "") or ""
+    reader_url = doc.get("url", "") or ""
     category = doc.get("category", "article")
-    word_count = doc.get("word_count", 0)
-    reading_time = doc.get("reading_time", "")
-    reading_progress = doc.get("reading_progress", 0)
-    summary = doc.get("summary", "")
+    location = doc.get("location", "")
+    word_count = doc.get("word_count") or 0
+    reading_time = doc.get("reading_time") or ""
+    reading_progress = doc.get("reading_progress") or 0
+    summary = doc.get("summary") or ""
     tags = doc.get("tags", {})
     saved_at = format_date(doc.get("saved_at"))
     published = format_date(doc.get("published_date"))
-    site_name = doc.get("site_name", "")
-    notes = doc.get("notes", "")
+    site_name = doc.get("site_name") or ""
+    notes = doc.get("notes") or ""
+    doc_id = doc.get("id", "")
 
-    # Tags as list
-    tag_list = list(tags.keys()) if isinstance(tags, dict) else tags
-    tag_str = ", ".join(f"`{t}`" for t in tag_list) if tag_list else ""
+    tag_list = sorted(tags.keys()) if isinstance(tags, dict) else (tags or [])
 
-    lines = []
-    lines.append(f"### [{title}]({source_url})")
+    # YAML frontmatter
+    lines = ["---"]
+    lines.append(f"id: {yaml_escape(doc_id)}")
+    lines.append(f"title: {yaml_escape(title)}")
+    lines.append(f"author: {yaml_escape(author)}")
+    lines.append(f"url: {yaml_escape(source_url)}")
+    lines.append(f"reader_url: {yaml_escape(reader_url)}")
+    lines.append(f"site: {yaml_escape(site_name)}")
+    lines.append(f"category: {category}")
+    lines.append(f"location: {location}")
+    lines.append(f"word_count: {word_count}")
+    lines.append(f"reading_time: {yaml_escape(reading_time)}")
+    lines.append(f"reading_progress: {reading_progress}")
+    if saved_at:
+        lines.append(f"saved_at: {saved_at}")
+    if published:
+        lines.append(f"published: {published}")
+    if tag_list:
+        lines.append(f"tags: [{', '.join(yaml_escape(t) for t in tag_list)}]")
+    else:
+        lines.append("tags: []")
+    lines.append("---")
     lines.append("")
 
-    # Metadata line
+    # Title
+    lines.append(f"# {title}")
+    lines.append("")
+
+    # Metadata
     meta = []
-    if author and author != "Unknown":
+    if author:
         meta.append(f"**{author}**")
     if site_name:
         meta.append(f"_{site_name}_")
@@ -149,41 +175,28 @@ def document_to_markdown(doc, include_highlights=False):
         lines.append(" · ".join(meta))
         lines.append("")
 
-    # Details
-    details = []
-    if category:
-        details.append(f"📂 {category}")
-    if word_count:
-        details.append(f"📝 {word_count:,} words")
-    if reading_time:
-        details.append(f"⏱️ {reading_time}")
-    if details:
-        lines.append(" | ".join(details))
+    if source_url:
+        lines.append(f"🔗 [{source_url[:80]}{'...' if len(source_url) > 80 else ''}]({source_url})")
+        lines.append("")
 
-    if reading_progress is not None and reading_progress > 0:
-        lines.append(f"📖 Progress: {progress_bar(reading_progress)}")
-
-    if saved_at != "Unknown":
-        lines.append(f"📅 Saved: {saved_at}")
-    if published and published != "Unknown":
-        lines.append(f"📰 Published: {published}")
-    if tag_str:
-        lines.append(f"🏷️ Tags: {tag_str}")
-
-    lines.append("")
-
+    # Summary
     if summary:
+        lines.append("## Summary")
+        lines.append("")
         lines.append(f"> {summary}")
         lines.append("")
 
+    # Notes
     if notes:
-        lines.append(f"**Notes:** {notes}")
+        lines.append("## Notes")
+        lines.append("")
+        lines.append(notes)
         lines.append("")
 
     # Highlights
     highlights = doc.get("_highlights", [])
     if highlights:
-        lines.append("#### Highlights")
+        lines.append("## Highlights")
         lines.append("")
         for h in highlights:
             text = h.get("content", h.get("title", ""))
@@ -194,37 +207,33 @@ def document_to_markdown(doc, include_highlights=False):
                     lines.append(f">\n> — _{h_notes}_")
                 lines.append("")
 
-    lines.append("---")
-    lines.append("")
     return "\n".join(lines)
 
 
 def generate_index(all_docs, output_dir):
-    """Generate a top-level index/README."""
+    """Generate a top-level README index."""
     queue = [d for d in all_docs if d.get("location") in LOCATIONS["queue"]]
     archive = [d for d in all_docs if d.get("location") in LOCATIONS["archive"]]
     feed = [d for d in all_docs if d.get("location") in LOCATIONS["feed"]]
 
-    lines = []
-    lines.append("# 📚 Readwise Reader Library")
-    lines.append("")
-    lines.append(f"_Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}_")
-    lines.append("")
-    lines.append("| Section | Count |")
-    lines.append("|---------|-------|")
-    lines.append(f"| [📋 Reading Queue](queue.md) | {len(queue)} |")
-    lines.append(f"| [✅ Archive](archive.md) | {len(archive)} |")
-    if feed:
-        lines.append(f"| [📡 Feed](feed.md) | {len(feed)} |")
-    lines.append("")
-
-    # Stats
     total_words = sum(d.get("word_count", 0) or 0 for d in all_docs)
     categories = {}
     for d in all_docs:
         cat = d.get("category", "other")
         categories[cat] = categories.get(cat, 0) + 1
 
+    lines = []
+    lines.append("# 📚 Readwise Reader Library")
+    lines.append("")
+    lines.append(f"_Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}_")
+    lines.append("")
+    lines.append("## Sections")
+    lines.append("")
+    lines.append(f"- [`queue/`](queue/) — 📋 Reading Queue ({len(queue)} items)")
+    lines.append(f"- [`archive/`](archive/) — ✅ Archive ({len(archive)} items)")
+    if feed:
+        lines.append(f"- [`feed/`](feed/) — 📡 Feed ({len(feed)} items)")
+    lines.append("")
     lines.append("## Stats")
     lines.append("")
     lines.append(f"- **Total items:** {len(all_docs)}")
@@ -232,11 +241,36 @@ def generate_index(all_docs, output_dir):
     lines.append(f"- **Categories:** {', '.join(f'{k} ({v})' for k, v in sorted(categories.items(), key=lambda x: -x[1]))}")
     lines.append("")
 
+    # Table of all items
+    lines.append("## All Items")
+    lines.append("")
+    lines.append("| Status | Title | Author | Category | Words | Progress |")
+    lines.append("|--------|-------|--------|----------|-------|----------|")
+    for doc in sorted(all_docs, key=lambda d: d.get("saved_at", ""), reverse=True):
+        title = doc.get("title", "Untitled") or "Untitled"
+        short_title = title[:50] + "..." if len(title) > 50 else title
+        author = doc.get("author", "") or ""
+        short_author = author[:20] + "..." if len(author) > 20 else author
+        cat = doc.get("category", "")
+        wc = doc.get("word_count") or 0
+        loc = doc.get("location", "")
+        progress = doc.get("reading_progress") or 0
+        pct = f"{int(progress * 100)}%" if progress else "-"
+
+        # Link to individual file
+        section = "queue" if loc in LOCATIONS["queue"] else ("archive" if loc in LOCATIONS["archive"] else "feed")
+        slug = slugify(title)
+        link = f"[{short_title}]({section}/{slug}.md)"
+
+        status = "📋" if loc in LOCATIONS["queue"] else ("✅" if loc in LOCATIONS["archive"] else "📡")
+        lines.append(f"| {status} | {link} | {short_author} | {cat} | {wc:,} | {pct} |")
+
+    lines.append("")
     return "\n".join(lines)
 
 
-def generate_section(docs, title, emoji, description=""):
-    """Generate a markdown file for a section (queue/archive/feed)."""
+def generate_section_index(docs, title, emoji, folder_name, description=""):
+    """Generate an index for a section folder."""
     lines = []
     lines.append(f"# {emoji} {title}")
     lines.append("")
@@ -257,26 +291,23 @@ def generate_section(docs, title, emoji, description=""):
         by_category.setdefault(cat, []).append(doc)
 
     cat_emojis = {
-        "article": "📄",
-        "email": "📧",
-        "rss": "📡",
-        "pdf": "📑",
-        "epub": "📖",
-        "tweet": "🐦",
-        "video": "🎬",
-        "highlight": "💡",
-        "note": "📝",
+        "article": "📄", "email": "📧", "rss": "📡", "pdf": "📑",
+        "epub": "📖", "tweet": "🐦", "video": "🎬", "highlight": "💡", "note": "📝",
     }
 
     for cat in sorted(by_category.keys()):
         cat_docs = by_category[cat]
-        # Sort by saved date, newest first
         cat_docs.sort(key=lambda d: d.get("saved_at", ""), reverse=True)
         emoji_cat = cat_emojis.get(cat, "📄")
         lines.append(f"## {emoji_cat} {cat.title()} ({len(cat_docs)})")
         lines.append("")
         for doc in cat_docs:
-            lines.append(document_to_markdown(doc))
+            title = doc.get("title", "Untitled") or "Untitled"
+            slug = slugify(title)
+            author = doc.get("author", "") or ""
+            saved = format_date(doc.get("saved_at")) or ""
+            lines.append(f"- [{title}]({slug}.md) — {author} ({saved})")
+        lines.append("")
 
     return "\n".join(lines)
 
@@ -303,7 +334,6 @@ def main():
 
     token = get_token()
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     print("🔄 Fetching documents from Readwise Reader...")
     all_docs = []
@@ -312,10 +342,8 @@ def main():
         for loc in locations:
             print(f"  📥 Fetching '{loc}' documents...")
             docs = fetch_all_documents(token, location=loc)
-            # Filter by category if specified
             if args.categories:
                 docs = [d for d in docs if d.get("category") in args.categories]
-            # Skip highlights/notes as top-level docs
             docs = [d for d in docs if d.get("parent_id") is None]
             all_docs.extend(docs)
             print(f"    Found {len(docs)} items")
@@ -331,41 +359,77 @@ def main():
             if (i + 1) % 10 == 0:
                 print(f"  Processed {i + 1}/{len(all_docs)}")
 
-    # Generate files
+    # Create folder structure
     print("\n📝 Generating markdown files...")
 
-    # Queue
-    queue_docs = [d for d in all_docs if d.get("location") in LOCATIONS["queue"]]
-    queue_md = generate_section(queue_docs, "Reading Queue", "📋", "Articles and documents waiting to be read.")
-    (output_dir / "queue.md").write_text(queue_md)
-    print(f"  ✅ queue.md ({len(queue_docs)} items)")
+    sections = {
+        "queue": {
+            "docs": [d for d in all_docs if d.get("location") in LOCATIONS["queue"]],
+            "title": "Reading Queue",
+            "emoji": "📋",
+            "desc": "Articles and documents waiting to be read.",
+        },
+        "archive": {
+            "docs": [d for d in all_docs if d.get("location") in LOCATIONS["archive"]],
+            "title": "Archive",
+            "emoji": "✅",
+            "desc": "Finished reading or archived for reference.",
+        },
+        "feed": {
+            "docs": [d for d in all_docs if d.get("location") in LOCATIONS["feed"]],
+            "title": "Feed",
+            "emoji": "📡",
+            "desc": "Items from RSS feeds and subscriptions.",
+        },
+    }
 
-    # Archive
-    archive_docs = [d for d in all_docs if d.get("location") in LOCATIONS["archive"]]
-    archive_md = generate_section(archive_docs, "Archive", "✅", "Finished reading or archived for reference.")
-    (output_dir / "archive.md").write_text(archive_md)
-    print(f"  ✅ archive.md ({len(archive_docs)} items)")
+    # Track slugs to handle duplicates
+    used_slugs = {}
 
-    # Feed
-    feed_docs = [d for d in all_docs if d.get("location") in LOCATIONS["feed"]]
-    if feed_docs:
-        feed_md = generate_section(feed_docs, "Feed", "📡", "Items from RSS feeds and subscriptions.")
-        (output_dir / "feed.md").write_text(feed_md)
-        print(f"  ✅ feed.md ({len(feed_docs)} items)")
+    for section_name, section in sections.items():
+        docs = section["docs"]
+        if not docs:
+            continue
 
-    # Index
+        section_dir = output_dir / section_name
+        section_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write individual files
+        for doc in docs:
+            title = doc.get("title", "Untitled") or "Untitled"
+            slug = slugify(title)
+
+            # Handle duplicate slugs
+            key = f"{section_name}/{slug}"
+            if key in used_slugs:
+                used_slugs[key] += 1
+                slug = f"{slug}-{used_slugs[key]}"
+            else:
+                used_slugs[key] = 0
+
+            filepath = section_dir / f"{slug}.md"
+            filepath.write_text(document_to_file(doc))
+
+        # Section index
+        index_md = generate_section_index(
+            docs, section["title"], section["emoji"], section_name, section["desc"]
+        )
+        (section_dir / "README.md").write_text(index_md)
+        print(f"  ✅ {section_name}/ ({len(docs)} files)")
+
+    # Top-level index
     index_md = generate_index(all_docs, output_dir)
     (output_dir / "README.md").write_text(index_md)
     print(f"  ✅ README.md (index)")
 
-    # Also dump raw JSON for potential future use
+    # Raw JSON backup
     json_path = output_dir / "data.json"
     with open(json_path, "w") as f:
         json.dump(all_docs, f, indent=2, default=str)
     print(f"  ✅ data.json (raw data backup)")
 
     print(f"\n🎉 Done! Output in: {output_dir.resolve()}")
-    print(f"   Open {output_dir / 'README.md'} to see the index.")
+    print(f"   {sum(len(s['docs']) for s in sections.values())} individual markdown files generated.")
 
 
 if __name__ == "__main__":
